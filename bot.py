@@ -83,16 +83,14 @@ async def send_weekly_poll():
 
         await bot.send_poll(
             chat_id=target_chat_id,
-            question="📊 Ваши планы на эту неделю?",
+            question="📊 Футбол во вторник?",
             options=[
-                "Работа над проектами",
-                "Митинги и планирование",
-                "Обучение и развитие",
-                "Административные задачи",
-                "Другое"
+                "Иду",
+                "Не иду",
+                "Скажу во вторник"
             ],
             is_anonymous=False,
-            allows_multiple_answers=True
+            allows_multiple_answers=False
         )
 
         logger.info("✅ Опрос успешно отправлен")
