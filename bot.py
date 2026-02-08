@@ -1,137 +1,165 @@
 import asyncio
 import logging
-from datetime import time as dt_time
-from contextlib import asynccontextmanager
+import os
+from zoneinfo import ZoneInfo
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramAPIError
+from aiogram.filters import Command
+from aiogram.types import Message
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
+from dotenv import load_dotenv
 
-from config import settings
+# Загрузка .env
+load_dotenv()
 
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(levelname)s - %(message)s"
 )
 logger = logging.getLogger(__name__)
 
+# Конфигурация из .env
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")  # Может быть пустым при первом запуске
+TIMEZONE = os.getenv("TIMEZONE", "Europe/Moscow")
 
-class PollSchedulerBot:
-    def __init__(self):
-        self.bot = Bot(
-            token=settings.BOT_TOKEN,
-            default=DefaultBotProperties(parse_mode=ParseMode.HTML)
+if not BOT_TOKEN:
+    raise ValueError("❌ BOT_TOKEN не указан в .env файле!")
+
+# Инициализация
+bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
+dp = Dispatcher()
+scheduler = AsyncIOScheduler(timezone=TIMEZONE)
+router = Router()
+
+
+@router.message(Command("getid"))
+async def cmd_getid(message: Message):
+    """Команда для получения ID чата и пользователя"""
+    chat_id = message.chat.id
+    user_id = message.from_user.id
+
+    response = (
+        f"🆔 <b>Chat ID:</b> <code>{chat_id}</code>\n"
+        f"👤 <b>Ваш User ID:</b> <code>{user_id}</code>\n\n"
+    )
+
+    if message.chat.type != "private":
+        response += (
+            f"🔖 <b>Тип чата:</b> {message.chat.type}\n"
+            f"📛 <b>Название:</b> {message.chat.title or 'без названия'}"
         )
-        self.dp = Dispatcher()
-        self.scheduler = AsyncIOScheduler(timezone=settings.TIMEZONE)
 
-    async def send_weekly_poll(self):
-        """Отправка еженедельного опроса"""
-        try:
-            logger.info("🕗 Отправка еженедельного опроса...")
+    await message.answer(response, parse_mode="HTML")
+    logger.info(f"Пользователь {user_id} запросил ID чата {chat_id}")
 
-            message = await self.bot.send_poll(
-                chat_id=settings.CHAT_ID,
-                question="📊 Планы на эту неделю?",
-                options=[
-                    "Работа над основными задачами",
-                    "Митинги и синхронизация",
-                    "Обучение и развитие",
-                    "Документация и отчёты",
-                    "Другое"
-                ],
-                is_anonymous=False,
-                allows_multiple_answers=True,
-                disable_notification=False
-            )
 
-            logger.info(f"✅ Опрос отправлен! Message ID: {message.message_id}")
+@router.message(Command("testpoll"))
+async def cmd_testpoll(message: Message):
+    """Тестовая отправка опроса"""
+    try:
+        await send_weekly_poll()
+        await message.answer("✅ Тестовый опрос отправлен!")
+    except Exception as e:
+        await message.answer(f"❌ Ошибка: {e}")
+        logger.exception("Ошибка при тестовой отправке опроса")
 
-        except TelegramAPIError as e:
-            logger.error(f"❌ Ошибка Telegram API: {e}")
-        except Exception as e:
-            logger.exception(f"❌ Критическая ошибка при отправке опроса: {e}")
 
-    async def send_test_poll(self, message_text: str = "Тестовый опрос"):
-        """Ручная отправка тестового опроса (для отладки)"""
-        try:
-            await self.bot.send_message(
-                chat_id=settings.CHAT_ID,
-                text=f"🔧 {message_text}"
-            )
-            await self.send_weekly_poll()
-            logger.info("✅ Тестовый опрос отправлен")
-        except Exception as e:
-            logger.exception(f"❌ Ошибка тестовой отправки: {e}")
+async def send_weekly_poll():
+    """Отправка еженедельного опроса"""
+    # Если CHAT_ID не задан в .env — используем значение из переменной окружения или падаем с ошибкой
+    target_chat_id = int(CHAT_ID) if CHAT_ID else None
 
-    def setup_scheduler(self):
-        """Настройка расписания"""
-        # Каждый понедельник в 9:30 утра
-        self.scheduler.add_job(
-            self.send_weekly_poll,
-            trigger=CronTrigger(
-                day_of_week="mon",
-                hour=9,
-                minute=30,
-                timezone=settings.tz_info
-            ),
-            id="weekly_poll",
-            name="Еженедельный опрос по понедельникам",
-            replace_existing=True,
-            misfire_grace_time=300  # 5 минут на компенсацию задержки
+    if not target_chat_id:
+        logger.error("❌ CHAT_ID не указан! Используйте команду /getid для получения ID чата.")
+        return
+
+    try:
+        logger.info(f"🕗 Отправка опроса в чат {target_chat_id}...")
+
+        await bot.send_poll(
+            chat_id=target_chat_id,
+            question="📊 Ваши планы на эту неделю?",
+            options=[
+                "Работа над проектами",
+                "Митинги и планирование",
+                "Обучение и развитие",
+                "Административные задачи",
+                "Другое"
+            ],
+            is_anonymous=False,
+            allows_multiple_answers=True
         )
-        logger.info(f"⏰ Планировщик настроен: понедельник 09:30 ({settings.TIMEZONE})")
 
-    @asynccontextmanager
-    async def lifespan(self, dp: Dispatcher):
-        """Контекстный менеджер для корректного старта/остановки"""
-        # Старт
-        self.setup_scheduler()
-        self.scheduler.start()
-        logger.info("🚀 Бот запущен и готов к работе")
+        logger.info("✅ Опрос успешно отправлен")
 
-        # Отправка тестового сообщения при старте (опционально)
-        # await self.send_test_poll("✅ Бот перезапущен и работает")
+    except Exception as e:
+        logger.exception(f"❌ Ошибка при отправке опроса: {e}")
 
-        yield
 
-        # Остановка
+def setup_scheduler():
+    """Настройка расписания (только если CHAT_ID задан)"""
+    if not CHAT_ID:
+        logger.warning("⚠️ CHAT_ID не указан — планировщик НЕ будет запущен")
+        logger.warning("💡 Добавьте CHAT_ID в .env после получения через /getid")
+        return
+
+    scheduler.add_job(
+        send_weekly_poll,
+        trigger=CronTrigger(
+            day_of_week="mon",
+            hour=9,
+            minute=30,
+            timezone=ZoneInfo(TIMEZONE)
+        ),
+        id="weekly_poll",
+        name="Еженедельный опрос",
+        replace_existing=True,
+        misfire_grace_time=300
+    )
+    logger.info(f"⏰ Планировщик настроен: понедельник 09:30 ({TIMEZONE})")
+
+
+async def on_startup(bot: Bot):
+    """Действия при старте бота"""
+    logger.info("🚀 Бот запущен!")
+    logger.info(f"ℹ️  Для получения CHAT_ID добавьте бота в чат и напишите /getid")
+
+    if CHAT_ID:
+        logger.info(f"✅ CHAT_ID задан: {CHAT_ID}")
+        setup_scheduler()
+        scheduler.start()
+    else:
+        logger.warning("⚠️  CHAT_ID не задан в .env — автоматическая отправка отключена")
+        logger.warning("💡 Отправьте /getid в нужном чате, затем добавьте ID в .env и перезапустите бота")
+
+
+async def on_shutdown(bot: Bot):
+    """Действия при остановке бота"""
+    if scheduler.running:
         logger.info("🛑 Остановка планировщика...")
-        self.scheduler.shutdown(wait=True)
-        await self.bot.session.close()
-        logger.info("👋 Бот остановлен")
-
-    async def start(self):
-        """Запуск бота"""
-        # Регистрация lifespan
-        self.dp.workflow_data.update({"bot": self.bot})
-        self.dp.startup.register(lambda: logger.info("🔄 Запуск бота..."))
-        self.dp.shutdown.register(lambda: logger.info("⏹️ Завершение работы..."))
-
-        # Запуск поллинга с контекстом
-        await self.dp.start_polling(
-            self.bot,
-            allowed_updates=self.dp.resolve_used_update_types(),
-            close_bot_session=True
-        )
+        scheduler.shutdown(wait=True)
+    logger.info("👋 Бот остановлен")
 
 
 async def main():
-    bot_instance = PollSchedulerBot()
+    # Регистрация роутера и хуков
+    dp.include_router(router)
+    dp.startup.register(on_startup)
+    dp.shutdown.register(on_shutdown)
 
-    try:
-        await bot_instance.start()
-    except KeyboardInterrupt:
-        logger.info("⚠️ Получен сигнал прерывания (Ctrl+C)")
-    except Exception as e:
-        logger.exception(f"❌ Критическая ошибка: {e}")
-    finally:
-        logger.info("🏁 Приложение завершено")
+    # Запуск поллинга
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        logger.info("⚠️ Бот остановлен пользователем")
+    except Exception as e:
+        logger.exception(f"❌ Критическая ошибка: {e}")
